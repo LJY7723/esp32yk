@@ -593,8 +593,89 @@ void netInfo()
 }
 
 // 5.蓝牙手柄
-void btGamepad() {}
+//void btGamepad() {}
+//---------------------------------------------5.蓝牙手柄------------------------------------------------------
+void btGamepad() {
+  bool refreshFlag = true;
+  const char* statusText[] = {"未连接", "已连接"};
+  
+  // 蓝牙仅初始化一次
+  static bool btInitialized = false;
+  if (!btInitialized) {
+    bt.begin("LilyGo_S3_Gamepad");
+    btInitialized = true;
+  }
 
+  screen.spr.setTextColor(TFT_WHITE);
+  screen.spr.setTextDatum(TC_DATUM);
+
+  while (true) {
+    // 更新按键数据
+    keys.kvs_update();
+
+    // 刷新屏幕UI
+    if (refreshFlag) {
+      screen.spr.fillRect(0, 145, 240, 40, TFT_BLACK);
+      screen.spr.fillRect(0, 400, 240, 60, TFT_BLACK);
+      screen.spr.drawString("蓝牙手柄", 120, 150, 4);
+      screen.spr.drawString(statusText[bt.isConnected()], 120, 420, 4);
+      
+      // 状态指示灯
+      screen.spr.fillSmoothCircle(120, 456, 6, 
+        bt.isConnected() ? TFT_CYAN : TFT_VIOLET, TFT_BLACK);
+      
+      lcd_PushColors(0, 0, screen.spr.width(), screen.spr.height(), (uint16_t*)screen.spr.getPointer());
+      refreshFlag = false;
+    }
+
+    // 连接成功后发送数据
+    if (bt.isConnected()) {
+      digitalWrite(PIN_LED, HIGH);
+      
+      // 按键掩码（上拉输入，取反判断按下）
+      uint16_t btnMask = 0;
+      if (!keys.kvs.L_up)      btnMask |= 0x0001;
+      if (!keys.kvs.L_down)    btnMask |= 0x0002;
+      if (!keys.kvs.R_up)      btnMask |= 0x0004;
+      if (!keys.kvs.R_down)    btnMask |= 0x0008;
+      if (!keys.kvs.board_L)   btnMask |= 0x0010;
+      if (!keys.kvs.board_R)   btnMask |= 0x0020;
+      if (!keys.kvs.up)        btnMask |= 0x0040;
+      if (!keys.kvs.down)      btnMask |= 0x0080;
+      if (!keys.kvs.left)      btnMask |= 0x0100;
+      if (!keys.kvs.right)     btnMask |= 0x0200;
+      if (!keys.kvs.o)         btnMask |= 0x0400;
+      if (!keys.kvs.x)         btnMask |= 0x0800;
+      if (!keys.kvs.a)         btnMask |= 0x1000;
+      if (!keys.kvs.b)         btnMask |= 0x2000;
+
+      // 直接使用KVS结构体数据
+      int8_t lx = keys.kvs.LX;
+      int8_t ly = keys.kvs.LY;
+      int8_t rx = keys.kvs.RX;
+      int8_t ry = keys.kvs.RY;
+      
+      // 旋钮格式转换
+      uint8_t knobL = map(keys.kvs.L_knob, -128, 127, 0, 255);
+      uint8_t knobR = map(keys.kvs.R_knob, -128, 127, 0, 255);
+
+      // 发送蓝牙数据
+      bt.sendReport(btnMask, lx, ly, rx, ry, knobL, knobR);
+    } else {
+      digitalWrite(PIN_LED, LOW);
+    }
+
+    // X键退出菜单
+    if (keys.x.pressed()) {
+      screen.spr.fillRect(0, 400, 240, 60, TFT_BLACK);
+      Serial.println("[蓝牙] 退出手柄模式");
+      refreshFlag = true;
+      break;
+    }
+
+    delay(20);
+  }
+}
 // 6.系统设置   ->   1.按键测试 2.陀螺仪立方体
 void systemSet()
 {
