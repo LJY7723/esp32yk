@@ -73,6 +73,8 @@ private:
 class Keys
 {
 public:
+	// 兼容旧代码的类型别名，Bluetooth.cpp 使用 Keys::KeyValues
+	using KeyValues = KVS;
 	// MCP IO扩展按键消抖对象，方法为自写
 	MCP_bounce up;
 	MCP_bounce down;

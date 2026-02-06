@@ -9,12 +9,12 @@
 #include "NRF.h"
 #include "Keys.h"
 #include "Screen.h"
-#include "Bluetooth.h"
 #include "WIFI.h"
 #include "LED.h"
 #include "Buzzer.h"
 #include "controller_keys.h" // 按键引脚定义
-
+#include <BleGamepad.h>       // ESP32-BLE-Gamepad库
+#include <WiFi.h>
 #include "chinese_32.h"  // 中文字库
 
 
@@ -59,10 +59,10 @@ int ID = 0;		  // 遥控器ID  0:黑 1:壮(默认0)
 NRF nrf;		 // 通信模块
 Keys keys;	     // 按键
 Screen screen;   // 屏幕
-Bluetooth bt;	 // 蓝牙
 WIFI wifi;	     // WiFi
 LED led;		 // 板载LED
 Buzzer buzzer;   // 蜂鸣器
+BleGamepad bleGamepad; // ESP32-BLE-Gamepad库对象
 
 
 
@@ -76,6 +76,10 @@ void VSGame();			// 3.双人对战   ->   1.弹球
 void netInfo();			// 4.网络信息   ->   1.哔哩哔哩 2.天气预报 3.股票基金
 void btGamepad();		// 5.蓝牙手柄
 void systemSet();		// 6.系统设置   ->   1.按键测试 2.陀螺仪立方体
+
+//--------------------------------------------- 蓝牙手柄辅助函数 -------------------------------------------------------
+void drawBleStatusScreen();		// 绘制蓝牙状态屏幕
+uint32_t mapBleButtons(const KVS& kvs);	// 映射按钮到BLE游戏手柄
 
 //--------------------------------------------- 二级菜单 -------------------------------------------------------
 //---------------------------------------------1.NRF遥控--------------------------------------------------------
@@ -129,7 +133,7 @@ void setup() {
 	screen.init();
 	buzzer.init();
 	led.init();
-
+	// 蓝牙手柄将在首次进入btGamepad()函数时自动初始化 
 	// 基本功能测试
 	{
 		//nrf.testConToCon();		   // 连遥控器间的测试连接 √
@@ -147,7 +151,12 @@ void setup() {
 void loop() {
 	//con.keys.kvs_update();         // √
 	//con.keys.ShowInSerial();		 // √	
-	delay(1000);
+	keys.kvs_update();         // 持续更新按键数据
+	// keys.ShowInSerial();	  // 可选：串口打印按键数据
+	
+	// 蓝牙手柄仅在进入btGamepad()函数时发送数据
+
+	delay(100);
 }
 
 
@@ -592,87 +601,97 @@ void netInfo()
 	}
 }
 
-// 5.蓝牙手柄
-//void btGamepad() {}
-//---------------------------------------------5.蓝牙手柄------------------------------------------------------
+// 5.蓝牙手柄（基于ESP32-BLE-Gamepad库）
 void btGamepad() {
-  bool refreshFlag = true;
-  const char* statusText[] = {"未连接", "已连接"};
+  bool firstDraw = true;
+  unsigned long lastUpdateTime = 0;
+  const unsigned long updateInterval = 500; // 500ms更新一次屏幕
+  static bool bleInitialized = false;
   
-  // 蓝牙仅初始化一次
-  static bool btInitialized = false;
-  if (!btInitialized) {
-    bt.begin("LilyGo_S3_Gamepad");
-    btInitialized = true;
+  // 首次进入时初始化蓝牙手柄
+  if (!bleInitialized) {
+    String deviceName = "LilyGo_S3_Gamepad_" + String(ESP.getEfuseMac() & 0xFFFF, HEX);
+    Serial.println("[蓝牙] 初始化BLE游戏手柄...");
+    Serial.print("[蓝牙] 设备名称: ");
+    Serial.println(deviceName);
+    
+    // 配置蓝牙手柄参数
+    BleGamepadConfiguration bleGamepadConfig;
+    bleGamepadConfig.setControllerType(CONTROLLER_TYPE_GAMEPAD); // 游戏手柄类型
+    bleGamepadConfig.setAutoReport(false); // 手动发送报告
+    bleGamepadConfig.setVid(0x1234); // 厂商ID
+    bleGamepadConfig.setPid(0x5678); // 产品ID
+    // 注意：setBatteryLevel() 函数在最新版本中可能不存在，已移除
+    
+    bleGamepad.begin(&bleGamepadConfig);
+    bleInitialized = true;
   }
 
-  screen.spr.setTextColor(TFT_WHITE);
-  screen.spr.setTextDatum(TC_DATUM);
+  // 首次进入时绘制状态屏幕
+  drawBleStatusScreen();
+  firstDraw = false;
 
   while (true) {
-    // 更新按键数据
+    // 1. 更新所有按键/摇杆数据
     keys.kvs_update();
 
-    // 刷新屏幕UI
-    if (refreshFlag) {
-      screen.spr.fillRect(0, 145, 240, 40, TFT_BLACK);
-      screen.spr.fillRect(0, 400, 240, 60, TFT_BLACK);
-      screen.spr.drawString("蓝牙手柄", 120, 150, 4);
-      screen.spr.drawString(statusText[bt.isConnected()], 120, 420, 4);
-      
-      // 状态指示灯
-      screen.spr.fillSmoothCircle(120, 456, 6, 
-        bt.isConnected() ? TFT_CYAN : TFT_VIOLET, TFT_BLACK);
-      
-      lcd_PushColors(0, 0, screen.spr.width(), screen.spr.height(), (uint16_t*)screen.spr.getPointer());
-      refreshFlag = false;
+    // 2. 定期更新屏幕显示（避免频繁刷新）
+    unsigned long currentTime = millis();
+    if (currentTime - lastUpdateTime >= updateInterval) {
+      drawBleStatusScreen();
+      lastUpdateTime = currentTime;
     }
 
-    // 连接成功后发送数据
-    if (bt.isConnected()) {
-      digitalWrite(PIN_LED, HIGH);
+    // 3. 蓝牙已连接：发送手柄数据
+    if (bleGamepad.isConnected()) {
+      led.on();  // 连接成功点亮LED
       
-      // 按键掩码（上拉输入，取反判断按下）
-      uint16_t btnMask = 0;
-      if (!keys.kvs.L_up)      btnMask |= 0x0001;
-      if (!keys.kvs.L_down)    btnMask |= 0x0002;
-      if (!keys.kvs.R_up)      btnMask |= 0x0004;
-      if (!keys.kvs.R_down)    btnMask |= 0x0008;
-      if (!keys.kvs.board_L)   btnMask |= 0x0010;
-      if (!keys.kvs.board_R)   btnMask |= 0x0020;
-      if (!keys.kvs.up)        btnMask |= 0x0040;
-      if (!keys.kvs.down)      btnMask |= 0x0080;
-      if (!keys.kvs.left)      btnMask |= 0x0100;
-      if (!keys.kvs.right)     btnMask |= 0x0200;
-      if (!keys.kvs.o)         btnMask |= 0x0400;
-      if (!keys.kvs.x)         btnMask |= 0x0800;
-      if (!keys.kvs.a)         btnMask |= 0x1000;
-      if (!keys.kvs.b)         btnMask |= 0x2000;
-
-      // 直接使用KVS结构体数据
-      int8_t lx = keys.kvs.LX;
-      int8_t ly = keys.kvs.LY;
-      int8_t rx = keys.kvs.RX;
-      int8_t ry = keys.kvs.RY;
+      // 映射按钮
+      uint32_t buttons = mapBleButtons(keys.kvs);
       
-      // 旋钮格式转换
-      uint8_t knobL = map(keys.kvs.L_knob, -128, 127, 0, 255);
-      uint8_t knobR = map(keys.kvs.R_knob, -128, 127, 0, 255);
-
-      // 发送蓝牙数据
-      bt.sendReport(btnMask, lx, ly, rx, ry, knobL, knobR);
+      // 映射摇杆（-32767到32767范围）
+      int16_t lx = map(keys.kvs.LX, -127, 127, -32767, 32767);
+      int16_t ly = map(keys.kvs.LY, -127, 127, -32767, 32767);
+      int16_t rx = map(keys.kvs.RX, -127, 127, -32767, 32767);
+      int16_t ry = map(keys.kvs.RY, -127, 127, -32767, 32767);
+      
+      // 映射旋钮（0到32767范围）
+      int16_t knobL = map(keys.kvs.L_knob, -127, 127, 0, 32767);
+      int16_t knobR = map(keys.kvs.R_knob, -127, 127, 0, 32767);
+      
+      // 发送手柄数据
+      bleGamepad.setAxes(lx, ly, rx, ry, 0, 0, knobL, knobR);
+      
+      // 设置按钮状态
+      for (int i = 0; i < 16; i++) {
+        if (buttons & (1 << i)) {
+          bleGamepad.press(i + 1); // BUTTON_1 到 BUTTON_16
+        } else {
+          bleGamepad.release(i + 1);
+        }
+      }
+      
+      // 发送报告
+      bleGamepad.sendReport();
+      
     } else {
-      digitalWrite(PIN_LED, LOW);
+      led.off(); // 断开连接关闭LED
+      
+	// 检查是否需要重新广播
+	static unsigned long lastAdvertiseTime = 0;
+	if (currentTime - lastAdvertiseTime >= 5000) { // 每5秒尝试重新广播
+	// ESP32-BLE-Gamepad库通常自动处理广播，无需手动重启
+	lastAdvertiseTime = currentTime;
+	}
     }
 
-    // X键退出菜单
+    // 4. 退出逻辑：按X键返回主菜单
     if (keys.x.pressed()) {
-      screen.spr.fillRect(0, 400, 240, 60, TFT_BLACK);
       Serial.println("[蓝牙] 退出手柄模式");
-      refreshFlag = true;
       break;
     }
 
+    // 5. 控制发送频率（20ms一次）
     delay(20);
   }
 }
@@ -1056,9 +1075,96 @@ int getVol()
 // 关闭周期性获取电压（定时器ID）
 //void closeGetVolTimer(int timerID);
 
+//--------------------------------------------- 蓝牙手柄辅助函数 -------------------------------------------------------
 
+// 绘制蓝牙状态屏幕
+void drawBleStatusScreen() {
+  // 清屏
+  screen.spr.fillSprite(TFT_BLACK);
+  
+  // 设置字体和颜色
+  screen.spr.setTextColor(TFT_WHITE);
+  screen.spr.setTextDatum(TC_DATUM);
+  
+  // 绘制标题
+  screen.spr.drawString("蓝牙手柄状态", 120, 20, 4);
+  
+  // 绘制分隔线
+  screen.spr.drawLine(20, 60, 220, 60, TFT_CYAN);
+  
+  // 绘制设备信息
+  screen.spr.setTextDatum(TL_DATUM);
+  screen.spr.drawString("设备名称:", 20, 80, 2);
+  String deviceName = "LilyGo_S3_Gamepad_" + String(ESP.getEfuseMac() & 0xFFFF, HEX);
+  screen.spr.drawString(deviceName, 100, 80, 2);
+  
+  screen.spr.drawString("MAC地址:", 20, 110, 2);
+  screen.spr.drawString(WiFi.macAddress(), 100, 110, 2);
+  
+  // 绘制连接状态
+  screen.spr.drawString("连接状态:", 20, 140, 2);
+  if (bleGamepad.isConnected()) {
+    screen.spr.setTextColor(TFT_GREEN);
+    screen.spr.drawString("已连接", 100, 140, 2);
+    screen.spr.fillSmoothCircle(200, 150, 10, TFT_GREEN, TFT_BLACK);
+  } else {
+    screen.spr.setTextColor(TFT_RED);
+    screen.spr.drawString("未连接", 100, 140, 2);
+    screen.spr.fillSmoothCircle(200, 150, 10, TFT_RED, TFT_BLACK);
+  }
+  
+  // 绘制广播状态
+  screen.spr.setTextColor(TFT_WHITE);
+  screen.spr.drawString("广播状态:", 20, 170, 2);
+if (!bleGamepad.isConnected()) {
+    screen.spr.setTextColor(TFT_YELLOW);
+    screen.spr.drawString("广播中", 100, 170, 2);
+    static uint8_t animCounter = 0;
+    animCounter++;
+    uint8_t radius = (animCounter % 20 < 10) ? 8 : 6;
+    screen.spr.fillSmoothCircle(200, 180, radius, TFT_YELLOW, TFT_BLACK);
+  } else {
+  screen.spr.setTextColor(TFT_BLUE);
+  screen.spr.drawString("已连接", 100, 170, 2);
+  screen.spr.fillSmoothCircle(200, 180, 8, TFT_BLUE, TFT_BLACK);
+  }
+  
+  // 绘制操作提示
+  screen.spr.setTextColor(TFT_CYAN);
+  screen.spr.setTextDatum(BC_DATUM);
+  screen.spr.drawString("按X键返回主菜单", 120, 460, 2);
+  
+  // 推送到屏幕
+  lcd_PushColors(0, 0, 240, 536, (uint16_t*)screen.spr.getPointer());
+}
 
-
-
-
-
+// 映射按钮到BLE游戏手柄
+uint32_t mapBleButtons(const KVS& kvs) {
+  uint32_t buttons = 0;
+  
+  // 前端4个按键 -> BUTTON_1 到 BUTTON_4
+  if (kvs.L_up == 0)    buttons |= (1 << 0);  // BUTTON_1
+  if (kvs.L_down == 0)  buttons |= (1 << 1);  // BUTTON_2
+  if (kvs.R_up == 0)    buttons |= (1 << 2);  // BUTTON_3
+  if (kvs.R_down == 0)  buttons |= (1 << 3);  // BUTTON_4
+  
+  // 板载2个按键 -> BUTTON_5 到 BUTTON_6
+  if (kvs.board_L == 0) buttons |= (1 << 4);  // BUTTON_5
+  if (kvs.board_R == 0) buttons |= (1 << 5);  // BUTTON_6
+  
+  // 8个功能键 -> BUTTON_7 到 BUTTON_14
+  if (kvs.up == 0)      buttons |= (1 << 6);  // BUTTON_7
+  if (kvs.down == 0)    buttons |= (1 << 7);  // BUTTON_8
+  if (kvs.left == 0)    buttons |= (1 << 8);  // BUTTON_9
+  if (kvs.right == 0)   buttons |= (1 << 9);  // BUTTON_10
+  if (kvs.o == 0)       buttons |= (1 << 10); // BUTTON_11
+  if (kvs.x == 0)       buttons |= (1 << 11); // BUTTON_12
+  if (kvs.a == 0)       buttons |= (1 << 12); // BUTTON_13
+  if (kvs.b == 0)       buttons |= (1 << 13); // BUTTON_14
+  
+  // 拨杆开关 -> BUTTON_15 到 BUTTON_16
+  if (kvs.switch_L1 == 0) buttons |= (1 << 14); // BUTTON_15
+  if (kvs.switch_L2 == 0) buttons |= (1 << 15); // BUTTON_16
+  
+  return buttons;
+}
